@@ -45,6 +45,16 @@ var (
 	slowDown       chan int
 	taskErrors     chan error
 	deletedObjects chan int
+
+	// flags
+	flagHelp   bool
+	flagBucket string
+	flagDryrun bool
+	flagFile   string
+	flagPool   int
+	flagPrefix string
+	flagRegion string
+	flagSilent bool
 )
 
 type DeleteTask struct {
@@ -89,7 +99,7 @@ func (t *DeleteTask) Done() {
 		output []string
 		prefix = "delete:"
 	)
-	if silent == false {
+	if flagSilent == false {
 		if t.dryrun {
 			prefix = "[dryrun] delete:"
 		}
@@ -105,12 +115,19 @@ func backoffNotify(e error, t time.Duration) {
 }
 
 func printProgress() {
-	if totalDeletedObjects > 0 {
-		rate := totalDeletedObjects / int64(time.Since(jobStart).Seconds())
-		fmt.Printf("\rDeleted %d of %d objects (%d workers / %d obj/s)", totalDeletedObjects, totalObjects, pool.Size, rate)
-	} else {
-		fmt.Printf("\rDeleted %d of %d objects (%d workers)", totalDeletedObjects, totalObjects, pool.Size)
+	var (
+		prefix string
+		detail string
+	)
+	if flagDryrun {
+		prefix = "[dryrun] "
 	}
+	detail = fmt.Sprintf("%d workers", pool.Size)
+	seconds := int64(time.Since(jobStart).Seconds())
+	if totalDeletedObjects > 0 && seconds > 0 {
+		detail = fmt.Sprintf("%s / %d obj/s", detail, totalDeletedObjects/seconds)
+	}
+	fmt.Printf("\r%sDeleted %d of %d objects (%s)", prefix, totalDeletedObjects, totalObjects, detail)
 }
 
 func main() {
@@ -120,14 +137,14 @@ func main() {
 	deletedObjects = make(chan int, 128)
 
 	flags := flag.NewFlagSet("flags", flag.ContinueOnError)
-	help := flags.Bool("h", false, "")
-	bucket := flags.String("bucket", "", "")
-	dryrun := flags.Bool("dryrun", false, "")
-	file := flags.String("file", "", "")
-	poolSize := flags.Int("pool", 10, "")
-	prefix := flags.String("prefix", "", "")
-	region := flags.String("region", "us-east-1", "")
-	quiet := flags.Bool("silent", false, "")
+	flags.BoolVar(&flagHelp, "h", false, "")
+	flags.StringVar(&flagBucket, "bucket", "", "")
+	flags.BoolVar(&flagDryrun, "dryrun", false, "")
+	flags.StringVar(&flagFile, "file", "", "")
+	flags.IntVar(&flagPool, "pool", 10, "")
+	flags.StringVar(&flagPrefix, "prefix", "", "")
+	flags.StringVar(&flagRegion, "region", "us-east-1", "")
+	flags.BoolVar(&flagSilent, "silent", false, "")
 
 	// check flag values
 	if err := flags.Parse(os.Args[1:]); err != nil {
@@ -135,14 +152,12 @@ func main() {
 		os.Exit(exitCodeFlagParseError)
 	}
 
-	silent = *quiet
-
-	if *help {
+	if flagHelp {
 		fmt.Printf(helpText)
 		os.Exit(exitCodeOK)
 	}
 
-	if *bucket == "" {
+	if flagBucket == "" {
 		fmt.Fprintln(os.Stderr, "Please provide a bucket name")
 		os.Exit(exitCodeFlagParseError)
 	}
@@ -151,7 +166,7 @@ func main() {
 	batchSize := 1000
 
 	// create elastic worker pool
-	pool = NewPool(*poolSize)
+	pool = NewPool(flagPool)
 
 	// make sure we don't go too fast
 	go func() {
@@ -160,12 +175,13 @@ func main() {
 			if pool.Size > 1 {
 				pool.Resize(pool.Size - 1)
 			}
-			time.Sleep(time.Second * 5)
+			printProgress()
+			time.Sleep(time.Second)
 		}
 	}()
 
 	sess := session.Must(session.NewSession(
-		&aws.Config{Region: region},
+		&aws.Config{Region: &flagRegion},
 	))
 	svc := s3.New(sess)
 
@@ -174,14 +190,14 @@ func main() {
 		scanner Scanner
 	)
 
-	if *file != "" {
-		scanner, err = NewFileScanner(*file)
+	if flagFile != "" {
+		scanner, err = NewFileScanner(flagFile)
 		if err != nil {
 			fmt.Println(err.Error())
 			os.Exit(exitCodeError)
 		}
-	} else if *prefix != "" {
-		scanner, err = NewBucketScanner(*bucket, *prefix, svc)
+	} else if flagPrefix != "" {
+		scanner, err = NewBucketScanner(flagBucket, flagPrefix, svc)
 		if err != nil {
 			fmt.Println(err.Error())
 			os.Exit(exitCodeError)
@@ -208,13 +224,13 @@ func main() {
 
 	for scanner.Scan(batchSize) {
 		totalObjects = totalObjects + int64(len(scanner.Objects()))
-		printProgress()
 		pool.Exec(&DeleteTask{
-			dryrun:  *dryrun,
+			dryrun:  flagDryrun,
 			client:  svc,
-			Bucket:  *bucket,
+			Bucket:  flagBucket,
 			Objects: scanner.Objects(),
 		})
+		printProgress()
 		compl = compl + batchSize
 	}
 
@@ -225,4 +241,6 @@ func main() {
 
 	pool.Close()
 	pool.Wait()
+	printProgress()
+	fmt.Println("")
 }

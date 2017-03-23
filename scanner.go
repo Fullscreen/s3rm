@@ -15,7 +15,7 @@ type Scanner interface {
 }
 
 type FileScanner struct {
-	buf []*s3.ObjectIdentifier
+	buf     []*s3.ObjectIdentifier
 	scanner *bufio.Scanner
 }
 
@@ -23,8 +23,8 @@ type BucketScanner struct {
 	Bucket string
 	Prefix string
 	client *s3.S3
-	err error
-	buf []*s3.ObjectIdentifier
+	err    error
+	buf    []*s3.ObjectIdentifier
 }
 
 func (s *FileScanner) Scan(count int) bool {
@@ -70,10 +70,10 @@ func (s *BucketScanner) Scan(count int) bool {
 
 	s.buf = nil
 	params := &s3.ListObjectsInput{
-			Bucket: aws.String(s.Bucket),
-			Marker: marker,
-			MaxKeys: aws.Int64(int64(count)),
-			Prefix: aws.String(s.Prefix),
+		Bucket:  aws.String(s.Bucket),
+		Marker:  marker,
+		MaxKeys: aws.Int64(int64(count)),
+		Prefix:  aws.String(s.Prefix),
 	}
 	resp, err := s.client.ListObjects(params)
 	if err != nil {
