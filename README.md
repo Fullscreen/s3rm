@@ -3,6 +3,11 @@ s3rm
 
 Delete tons of s3 objects efficiently.
 
+This utility makes use of the [Multi-Object Delete](https://docs.aws.amazon.com/AmazonS3/latest/API/multiobjectdeleteapi.html)
+S3 endpoint and the [concurrency primitives of go](https://tour.golang.org/concurrency/1)
+to quickly and efficiently delete large numbers of objects. Object lists
+can be specified in a file or fetched recursively based on a bucket prefix.
+
 Usage
 =====
 ```shell
