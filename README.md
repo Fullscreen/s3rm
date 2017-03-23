@@ -10,20 +10,20 @@ $ s3rm -h
 Usage: s3rm [options]
 
 Options:
-  -h           Print this message and exit
-  -bucket      The s3 bucket
-  -dryrun      Print side-effects without actually deleting anything
-  -file        A file containing the objects to be deleted
+  -bucket      The target S3 bucket name
+  -dryrun      Run through object list without actually deleting anything
+  -file        A file containing the object keys to be deleted
+  -help        Print this message and exit
+  -output      A file to write deleted object keys to
   -pool        Max worker pool size (default: 10)
-  -region      The AWS region of the bucket
-  -silent      Don't print delete objects
-
+  -prefix      List and delete all objects with this prefix
+  -region      The AWS region of the target bucket
 ```
 
 Output statistics update in real-time
 ```shell
 $ s3rm -bucket mybucket -file objects_to_delete.txt -pool 30
-Deleted 43000 of 202000 objects (30 workers / 6142 objects/s)
+delete: 43000 of 202000 objects (30 workers, 6142 obj/s)
 ```
 
 Planned Features

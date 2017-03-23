@@ -16,45 +16,51 @@ import (
 )
 
 const (
-	exitCodeOK             int = 0
-	exitCodeError          int = 1
-	exitCodeFlagParseError     = 10 + iota
-	exitCodeAWSError
+	ExitCodeOK             int = 0
+	ExitCodeError          int = 1
+	ExitCodeFlagParseError     = 10 + iota
+	ExitCodeAWSError
+
+	DefaultBatchSize        int           = 1000
+	ProgressRefreshInterval time.Duration = 100 * time.Millisecond
 )
 
 const helpText string = `Usage: s3rm [options]
 
 Options:
-  -h           Print this message and exit
-  -bucket      The s3 bucket
-  -dryrun      Print side-effects without actually deleting anything
-  -file        A file containing the objects to be deleted
+  -bucket      The target S3 bucket name
+  -dryrun      Run through object list without actually deleting anything
+  -file        A file containing the object keys to be deleted
+  -help        Print this message and exit
+  -output      A file to write deleted object keys to
   -pool        Max worker pool size (default: 10)
-  -region      The AWS region of the bucket
-  -silent      Don't print delete objects
+  -prefix      List and delete all objects with this prefix
+  -region      The AWS region of the target bucket
 `
 
 var (
 	pool                *Pool
 	jobStart            time.Time
-	silent              bool
 	totalObjects        int64
 	totalDeletedObjects int64
+
+	// file descriptors
+	outputFile *os.File
 
 	// channels
 	slowDown       chan int
 	taskErrors     chan error
-	deletedObjects chan int
+	deletedObjects chan []*s3.ObjectIdentifier
 
 	// flags
-	flagHelp   bool
 	flagBucket string
 	flagDryrun bool
 	flagFile   string
+	flagHelp   bool
+	flagOutput string
 	flagPool   int
 	flagPrefix string
 	flagRegion string
-	flagSilent bool
 )
 
 type DeleteTask struct {
@@ -66,7 +72,7 @@ type DeleteTask struct {
 
 func (t *DeleteTask) Execute() error {
 	if t.dryrun {
-		deletedObjects <- len(t.Objects)
+		deletedObjects <- t.Objects
 		return nil
 	}
 
@@ -88,26 +94,10 @@ func (t *DeleteTask) Execute() error {
 			}
 			return &backoff.PermanentError{Err: err}
 		}
-		deletedObjects <- len(t.Objects)
+		deletedObjects <- t.Objects
 		return nil
 	}
 	return backoff.RetryNotify(operation, backoff.NewExponentialBackOff(), backoffNotify)
-}
-
-func (t *DeleteTask) Done() {
-	var (
-		output []string
-		prefix = "delete:"
-	)
-	if flagSilent == false {
-		if t.dryrun {
-			prefix = "[dryrun] delete:"
-		}
-		for _, obj := range t.Objects {
-			output = append(output, fmt.Sprintf("%s %s", prefix, *obj.Key))
-		}
-		fmt.Println(strings.Join(output, "\n"))
-	}
 }
 
 func backoffNotify(e error, t time.Duration) {
@@ -125,45 +115,55 @@ func printProgress() {
 	detail = fmt.Sprintf("%d workers", pool.Size)
 	seconds := int64(time.Since(jobStart).Seconds())
 	if totalDeletedObjects > 0 && seconds > 0 {
-		detail = fmt.Sprintf("%s / %d obj/s", detail, totalDeletedObjects/seconds)
+		detail = fmt.Sprintf("%s, %d obj/s", detail, totalDeletedObjects/seconds)
 	}
-	fmt.Printf("\r%sDeleted %d of %d objects (%s)", prefix, totalDeletedObjects, totalObjects, detail)
+	fmt.Printf("\r%sdelete: %d of %d objects (%s)", prefix, totalDeletedObjects, totalObjects, detail)
 }
 
 func main() {
 	// initialize channels
 	slowDown = make(chan int)
 	taskErrors = make(chan error, 128)
-	deletedObjects = make(chan int, 128)
+	deletedObjects = make(chan []*s3.ObjectIdentifier, 128)
 
 	flags := flag.NewFlagSet("flags", flag.ContinueOnError)
-	flags.BoolVar(&flagHelp, "h", false, "")
+	flags.BoolVar(&flagHelp, "help", false, "")
 	flags.StringVar(&flagBucket, "bucket", "", "")
 	flags.BoolVar(&flagDryrun, "dryrun", false, "")
 	flags.StringVar(&flagFile, "file", "", "")
+	flags.StringVar(&flagOutput, "output", "", "")
 	flags.IntVar(&flagPool, "pool", 10, "")
 	flags.StringVar(&flagPrefix, "prefix", "", "")
 	flags.StringVar(&flagRegion, "region", "us-east-1", "")
-	flags.BoolVar(&flagSilent, "silent", false, "")
 
 	// check flag values
 	if err := flags.Parse(os.Args[1:]); err != nil {
 		fmt.Println(err.Error())
-		os.Exit(exitCodeFlagParseError)
+		os.Exit(ExitCodeFlagParseError)
 	}
 
 	if flagHelp {
 		fmt.Printf(helpText)
-		os.Exit(exitCodeOK)
+		os.Exit(ExitCodeOK)
 	}
 
 	if flagBucket == "" {
 		fmt.Fprintln(os.Stderr, "Please provide a bucket name")
-		os.Exit(exitCodeFlagParseError)
+		os.Exit(ExitCodeFlagParseError)
 	}
 
 	var compl int
-	batchSize := 1000
+	batchSize := DefaultBatchSize
+
+	// setup output file
+	if flagOutput != "" {
+		f, err := os.Create(flagOutput)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		outputFile = f
+	}
 
 	// create elastic worker pool
 	pool = NewPool(flagPool)
@@ -175,7 +175,6 @@ func main() {
 			if pool.Size > 1 {
 				pool.Resize(pool.Size - 1)
 			}
-			printProgress()
 			time.Sleep(time.Second)
 		}
 	}()
@@ -194,25 +193,35 @@ func main() {
 		scanner, err = NewFileScanner(flagFile)
 		if err != nil {
 			fmt.Println(err.Error())
-			os.Exit(exitCodeError)
+			os.Exit(ExitCodeError)
 		}
 	} else if flagPrefix != "" {
 		scanner, err = NewBucketScanner(flagBucket, flagPrefix, svc)
 		if err != nil {
 			fmt.Println(err.Error())
-			os.Exit(exitCodeError)
+			os.Exit(ExitCodeError)
 		}
 	} else {
 		fmt.Fprintln(os.Stderr, "Please provide an s3 prefix or an objects file")
-		os.Exit(exitCodeFlagParseError)
+		os.Exit(ExitCodeFlagParseError)
 	}
 
 	go func() {
 		for {
 			select {
-			case count := <-deletedObjects:
-				atomic.AddInt64(&totalDeletedObjects, int64(count))
-				printProgress()
+			case objects := <-deletedObjects:
+				atomic.AddInt64(&totalDeletedObjects, int64(len(objects)))
+				if flagOutput != "" {
+					var output []string
+					for _, obj := range objects {
+						output = append(output, fmt.Sprintf("delete: %s", *obj.Key))
+					}
+					_, err := outputFile.WriteString(fmt.Sprintln(strings.Join(output, "\n")))
+					if err != nil {
+						fmt.Fprintln(os.Stderr, err)
+						os.Exit(1)
+					}
+				}
 			case err := <-pool.errors:
 				fmt.Fprintln(os.Stderr, err)
 			}
@@ -222,6 +231,14 @@ func main() {
 	// track time for calculating delete rate
 	jobStart = time.Now()
 
+	// start progress bar
+	go func() {
+		for {
+			printProgress()
+			time.Sleep(ProgressRefreshInterval)
+		}
+	}()
+
 	for scanner.Scan(batchSize) {
 		totalObjects = totalObjects + int64(len(scanner.Objects()))
 		pool.Exec(&DeleteTask{
@@ -230,7 +247,6 @@ func main() {
 			Bucket:  flagBucket,
 			Objects: scanner.Objects(),
 		})
-		printProgress()
 		compl = compl + batchSize
 	}
 

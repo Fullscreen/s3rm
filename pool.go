@@ -6,7 +6,6 @@ import (
 
 type Task interface {
 	Execute() error
-	Done()
 }
 
 type Pool struct {
@@ -39,8 +38,6 @@ func (p *Pool) worker() {
 			err := task.Execute()
 			if err != nil {
 				p.errors <- err
-			} else {
-				task.Done()
 			}
 		case <-p.kill:
 			return
