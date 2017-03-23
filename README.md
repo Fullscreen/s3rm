@@ -8,6 +8,12 @@ S3 endpoint and the [concurrency primitives of go](https://tour.golang.org/concu
 to quickly and efficiently delete large numbers of objects. Object lists
 can be specified in a file or fetched recursively based on a bucket prefix.
 
+Installation
+============
+```shell
+go get github.com/fullscreen/s3rm
+```
+
 Usage
 =====
 ```shell
